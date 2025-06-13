@@ -1,39 +1,57 @@
-var builder = WebApplication.CreateBuilder(args);
+using Microsoft.AspNetCore.Mvc;
+using PedidosApp.API.Entities;
+using PedidosApp.API.Producers;
+using PedidosApp.API.Records;
+using PedidosApp.API.Repositories;
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
 builder.Services.AddOpenApi();
+
+//Registrar o repositório de pedidos como um serviço
+builder.Services.AddScoped(
+    map => new PedidoRepository(builder.Configuration.GetConnectionString("PedidosBD")));
+
+//Registrar o MessageProducer como um serviço
+builder.Services.AddScoped(
+    map => new MessageProducer(builder.Configuration["RabbitMQ:Host"], builder.Configuration["RabbitMQ:Queue"]));
+
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
+app.MapOpenApi();
+app.UseSwagger();
+app.UseSwaggerUI();
 
-var summaries = new[]
+//ENDPOINT para cadastro de pedidos
+app.MapPost("/api/pedidos", async ([FromBody] PedidoRequest request, PedidoRepository pedidoRepository, 
+    MessageProducer messageProducer) =>
 {
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+    //capturar os dados do pedido
+    var pedido = new Pedido
+    {
+        Id = Guid.NewGuid(),
+        DataHora = DateTime.Now,
+        Cliente = request.Cliente,
+        Valor = request.Valor,
+        Detalhes = request.Detalhes
+    };
 
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast = Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+    //inserir o pedido no banco de dados
+    await pedidoRepository.Inserir(pedido);
+
+    //enviar o pedido para a fila RabbitMQ
+    messageProducer.SendMessage(pedido);
+
+    //retornar o pedido inserido
+    return Results.Created("/api/pedidos/", new PedidoResponse(
+            pedido.Id.Value,
+            pedido.Cliente ?? string.Empty,
+            pedido.Valor,
+            pedido.DataHora.Value,
+            pedido.Detalhes ?? string.Empty
+        ));
+}).Produces<PedidoResponse>(StatusCodes.Status201Created);
 
 app.Run();
-
-internal record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
